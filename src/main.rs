@@ -3,17 +3,30 @@ use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{
-        mpsc::{Receiver, Sender},
-        Notify,
-    },
+    sync::{mpsc::Sender, Notify},
     task::JoinHandle,
 };
 
 #[tokio::main]
 async fn main() {
+    struct PortTarget {
+        port: u16,
+        target: String,
+    }
+
+    impl PortTarget {
+        fn new(port: u16, target: String) -> Self {
+            PortTarget { port, target }
+        }
+    }
+
     // mockdata - Fetch this from sqlite in the future. NOTE - maybe use a .yaml file instead?
-    let ports: Vec<u16> = vec![3037, 3034, 3035, 3036];
+    let port_targets: Vec<PortTarget> = vec![
+        PortTarget::new(3000, "http://localhost:3000".to_string()),
+        PortTarget::new(3001, "http://localhost:3001".to_string()),
+        PortTarget::new(3002, "http://localhost:3002".to_string()),
+        PortTarget::new(3003, "http://localhost:3003".to_string()),
+    ];
 
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
@@ -22,9 +35,9 @@ async fn main() {
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
     let number_of_workers = 4;
 
-    for port in ports {
-        let tx: Sender<TcpStream> = tx.clone();
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+    for port_target in port_targets {
+        let tx: Sender<(TcpStream, String)> = tx.clone();
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", port_target.port))
             .await
             .unwrap();
         let notify = notify.clone();
@@ -35,11 +48,11 @@ async fn main() {
                     Ok((socket, _)) => {
                         let notify = notify.clone();
 
-                        if let Err(e) = tx.send(socket).await {
+                        let message = (socket, port_target.target.clone());
+
+                        if let Err(e) = tx.send(message).await {
                             eprintln!("Failed to send message: {}", e);
                         }
-
-                        println!("port: {} - pong", port);
 
                         notify.notify_one();
                     }
@@ -59,7 +72,7 @@ async fn main() {
             loop {
                 notify.notified().await;
                 let mut rx = rx.lock().await;
-                while let Ok(mut socket) = rx.try_recv() {
+                while let Ok((mut socket, target)) = rx.try_recv() {
                     tokio::spawn(async move {
                         let mut buf = [0; 1024];
 
@@ -72,7 +85,7 @@ async fn main() {
                                         break;
                                     }
 
-                                    println!("ping {}", worker)
+                                    println!("worker {} active", worker)
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to read from socket: {}", e);
